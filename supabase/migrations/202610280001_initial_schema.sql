@@ -335,7 +335,7 @@ create policy "profile self or staff read" on public.profiles for select using (
 create policy "profile self update" on public.profiles for update using (id = auth.uid()) with check (id = auth.uid());
 create policy "profile self create" on public.profiles for insert with check (id = auth.uid());
 create policy "participant owner or assigned staff read" on public.participants for select using (user_id = auth.uid() or public.current_role() in ('admin','supervisor','me_officer') or (public.current_role()='field_officer' and assigned_officer=auth.uid()) or (public.current_role()='case_worker' and (assigned_case_worker=auth.uid() or assigned_officer=auth.uid())));
-create policy "participant self create" on public.participants for insert with check ((user_id = auth.uid() and public.current_role()='participant' and current_level is null and assigned_officer is null) or public.current_role() in ('admin','supervisor','case_worker','field_officer'));
+create policy "participant self create" on public.participants for insert with check ((user_id = auth.uid() and public.current_role()='participant' and current_level is null and assigned_officer is null and assigned_case_worker is null) or public.current_role() in ('admin','supervisor','case_worker','field_officer'));
 create policy "participant assigned staff update" on public.participants for update using (public.current_role() in ('admin','supervisor','me_officer') or (public.current_role()='field_officer' and assigned_officer=auth.uid()) or (public.current_role()='case_worker' and (assigned_case_worker=auth.uid() or assigned_officer=auth.uid()))) with check (public.current_role() in ('admin','supervisor','me_officer') or (public.current_role()='field_officer' and assigned_officer=auth.uid()) or (public.current_role()='case_worker' and (assigned_case_worker=auth.uid() or assigned_officer=auth.uid())));
 create policy "application owner or assigned staff read" on public.applications for select using (exists(select 1 from public.participants p where p.id=participant_id and p.user_id=auth.uid()) or public.can_access_participant(participant_id));
 create policy "application owner create or care staff" on public.applications for insert with check ((exists(select 1 from public.participants p where p.id=participant_id and p.user_id=auth.uid()) and status in ('draft','submitted') and reviewer_id is null and review_note is null) or public.is_care_staff());
@@ -379,7 +379,7 @@ create policy "impact care staff read" on public.impact_stories for select using
 create policy "impact care staff manage" on public.impact_stories for all using (public.is_care_staff()) with check (public.is_care_staff());
 create policy "finance restricted read" on public.finance_entries for select using (public.current_role() in ('admin','supervisor','finance_officer'));
 create policy "finance authorized insert" on public.finance_entries for insert with check (public.current_role() in ('admin','finance_officer'));
-create policy "finance authorized update" on public.finance_entries for update using (public.current_role() in ('admin','finance_officer')) with check (public.current_role() in ('admin','finance_officer'));
+create policy "finance authorized update" on public.finance_entries for update using (public.current_role() in ('admin','finance_officer','supervisor')) with check (public.current_role() in ('admin','finance_officer','supervisor'));
 create policy "message participant or assigned staff read" on public.messages for select using (exists(select 1 from public.participants p where p.id=participant_id and p.user_id=auth.uid()) or public.can_access_participant(participant_id));
 create policy "message participant or assigned staff create" on public.messages for insert with check ((sender_id=auth.uid() and exists(select 1 from public.participants p where p.id=participant_id and p.user_id=auth.uid())) or (sender_id=auth.uid() and public.can_access_participant(participant_id)));
 create policy "message assigned staff update" on public.messages for update using (public.can_access_participant(participant_id)) with check (public.can_access_participant(participant_id));
@@ -399,6 +399,18 @@ language plpgsql security definer set search_path = public
 as $$ begin
   if new.role is distinct from old.role and old.id = auth.uid() and old.role <> 'admin' then
     raise exception 'Only an administrator can change staff roles';
+  end if;
+  return new;
+end $$;
+create or replace function public.enforce_level_transition_approval() returns trigger
+language plpgsql security definer set search_path = public
+as $$ begin
+  if new.current_level is distinct from old.current_level then
+    if public.current_role() not in ('admin','supervisor') then
+      raise exception 'A supervisor must approve participant level changes';
+    end if;
+    insert into public.level_transitions(participant_id,from_level,to_level,reason,approved_by)
+    values(new.id,old.current_level,new.current_level,'Supervisor-approved level transition',auth.uid());
   end if;
   return new;
 end $$;
@@ -426,6 +438,8 @@ create trigger audit_referral_change after insert or update or delete on public.
 create trigger audit_transition_change after insert or update or delete on public.level_transitions for each row execute procedure public.write_audit_log();
 create trigger protect_profile_role before update on public.profiles
 for each row execute procedure public.prevent_role_escalation();
+create trigger require_level_transition_approval before update on public.participants
+for each row execute procedure public.enforce_level_transition_approval();
 create trigger on_auth_user_created after insert on auth.users
 for each row execute procedure public.handle_new_user();
 
@@ -436,6 +450,7 @@ revoke all on function public.is_admin_or_supervisor() from public;
 revoke all on function public.is_care_staff() from public;
 revoke all on function public.can_access_participant(uuid) from public;
 revoke all on function public.write_audit_log() from public;
+revoke all on function public.enforce_level_transition_approval() from public;
 grant execute on function public.current_role() to authenticated;
 grant execute on function public.is_staff() to authenticated;
 grant execute on function public.is_admin_or_supervisor() to authenticated;
